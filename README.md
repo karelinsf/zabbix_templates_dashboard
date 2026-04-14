@@ -77,7 +77,11 @@ Cкриншот страницы хостов, где будут видны пр
 Код скрипта
 
 ```bash
-sudo -s
+#!/bin/bash
+PREFIX="${1:-NOT_SET}"
+[[ "$PREFIX" = "NOT_SET" ]] && { echo "Required argument"; }
+[[ "$PREFIX" = "1" ]] && { echo "KarelinSF"; }
+[[ "$PREFIX" = "2" ]] && { echo "$(date +"%Y-%m-%d")"; }
 ```
 
 Скриншот Latest data с результатом работы скрипта на bash, чтобы был виден результат работы скрипта при отправке в него 1 и 2
@@ -95,7 +99,22 @@ sudo -s
 Код скрипта
 
 ```python
-print(1)
+from datetime import date
+import sys
+import os
+import re
+if (sys.argv[1] == '1'):
+  print('KarelinSF')
+elif (sys.argv[1] == '2'):
+  print(date.today())
+elif (sys.argv[1] == '-ping'): # Если -ping
+  result=os.popen("ping -c 1 " + sys.argv[2]).read() # Делаем пинг по заданному адресу
+  result=re.findall(r"time=(.*) ms", result) # Выдёргиваем из результата время
+  print(result[0]) # Выводим результат в консоль
+elif (sys.argv[1] == '-simple_print'): # Если simple_print
+  print(sys.argv[2]) # Выводим в консоль содержимое sys.arvg[2]
+else: # Во всех остальных случаях
+  print(f"unknown input: {sys.argv[1]}") # Выводим непонятый запрос в консоль
 ```
 
 Скриншот Latest data с результатом работы скрипта на Python, чтобы были видны результаты работы скрипта при отправке в него 1, 2, -ping, а также -simple_print.*
@@ -122,14 +141,179 @@ print(1)
 Файл Vagrantfile
 
 ```yaml
-name
+
+VAGRANTFILE_API_VERSION = "2"
+#ENV['VAGRANT_SERVER_URL'] = 'http://vagrant.elab.pro'
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  #config.vm.provider = 'virtualbox'
+  config.vm.boot_timeout = 800
+  
+  config.vm.define "zabbixserver" do | zs |
+    zs.vm.box = 'ubuntu/jammy64'
+    zs.vm.host_name = "zabbixserv"
+    zs.vm.network "public_network", bridge: "enp7s0"
+    zs.vm.network "private_network", ip: "192.168.56.10"
+       zs.vm.provider :virtualbox do |res|
+
+          res.customize ["modifyvm", :id, "--cpus", "2"]
+          res.customize ["modifyvm", :id, "--memory", "2000"]
+       end
+
+  end
+
+  config.vm.define "net1" do | n1 |
+    n1.vm.box= 'ubuntu/jammy64'
+    n1.vm.host_name = "net1"
+
+    n1.vm.network "private_network", ip: "192.168.56.11"
+    
+      n1.vm.provider :virtualbox do |res|
+
+        res.customize ["modifyvm", :id, "--cpus", "2"]
+        res.customize ["modifyvm", :id, "--memory", "2000"]
+      end
+
+  end
+
+  config.vm.define "net2" do | n2 |
+    n2.vm.box= 'ubuntu/jammy64'
+    n2.vm.host_name = "net1"
+
+    n2.vm.network "private_network", ip: "192.168.56.12"
+    
+      n2.vm.provider :virtualbox do |res|
+
+        res.customize ["modifyvm", :id, "--cpus", "2"]
+        res.customize ["modifyvm", :id, "--memory", "2000"]
+      end
+
+  end
+
+  config.vm.provision "ansible" do |ansible|
+    ansible.groups = {
+      "zabbix-server" => ["zabbixserver"],
+      "zabbix-agent" => ["net1", "net2"],
+    }
+    ansible.playbook = "playbook.yml"
+    ansible.compatibility_mode = "2.0"
+  end
+
+end
 ```
 
 Файл для ansible
 ```yaml
-name
-```
-Файл zabbix-agent.sh
-```bash
-sudo -s
+# Install zabbix-server
+- name: Add repository
+  hosts: all
+  become: yes
+  tasks:
+
+  - name: Download repo Zabbix
+    shell: wget https://repo.zabbix.com/zabbix/6.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_6.0+ubuntu22.04_all.deb
+
+  - name: install repo
+    shell: dpkg -i zabbix-release_latest_6.0+ubuntu22.04_all.deb
+
+  - name: Update apt packages
+    become: true
+    apt:
+      update_cache: yes
+
+- name: Install Zabbix-server
+  hosts: zabbix-server
+  become: yes
+  tasks:
+
+  - name: install postgresql
+    apt:
+      name:
+        - postgresql
+      state: present
+  
+  - name: install zabbix-server 
+    apt:
+      name:
+        - zabbix-server-pgsql 
+        - zabbix-frontend-php
+        - php8.1-pgsql
+        - zabbix-apache-conf
+        - zabbix-sql-scripts
+        - zabbix-agent
+      state: present
+  
+  - name: create user psql
+    shell: su - postgres -c 'psql --command "CREATE USER zabbix WITH PASSWORD '\'123456789\'';"' 
+    ignore_errors: true
+
+  - name: make owner
+    shell: su - postgres -c 'psql --command "CREATE DATABASE zabbix OWNER zabbix;"'
+    ignore_errors: true
+    
+  - name: extract archive
+    shell: zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | sudo -u zabbix psql zabbix
+
+  - name: set passwd DB
+    shell:  sed -i 's/# DBPassword=/DBPassword=123456789/g' /etc/zabbix/zabbix_server.conf
+
+  - name: retart and enable zabbix-server
+    systemd:
+      name: zabbix-server
+      state: restarted
+      enabled: yes
+
+  - name: retart and enable apache2
+    systemd:
+      name: apache2
+      state: restarted
+      enabled: yes
+
+  - name: zabbix-server status
+    shell:  service zabbix-server status
+    register: zabbixtxt
+  
+  - name: "Print the file content to a console"
+    debug:
+      msg: "{{ zabbixtxt.stdout }}"
+ 
+  - name: rm package file
+    shell: rm zabbix-release_latest_6.0+ubuntu22.04_all.deb*
+ 
+ 
+- name: Install Zabbix-agent
+  hosts: zabbix-agent
+  become: yes
+  tasks:
+
+  - name: install zabbix-agent
+    apt:
+      name:
+        - zabbix-agent
+      state: present
+  
+  - name: set zabbix server IP
+    shell:  sed -i 's/Server=127.0.0.1/Server=192.168.56.10/g' /etc/zabbix/zabbix_agentd.conf
+
+  - name: copy UserParameter
+    ansible.builtin.copy:
+      src: UserParameter/
+      dest: /etc/zabbix/zabbix_agentd.d/
+
+  - name: retart and enable zabbix-agent
+    systemd:
+      name: zabbix-agent
+      state: restarted
+      enabled: yes
+
+  - name: zabbix-agent status
+    shell:  service zabbix-agent status
+    register: zabbixtxt
+  
+  - name: "Print the file content to a console"
+    debug:
+      msg: "{{ zabbixtxt.stdout }}"
+ 
+  - name: rm package file
+    shell: rm zabbix-release_latest_6.0+ubuntu22.04_all.deb*  
 ```
